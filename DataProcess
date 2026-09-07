@@ -1,1 +1,461 @@
+## Discovery QC figure panels
+import matplotlib as mpl, matplotlib.pyplot as plt
+apply_figure_style(sizes=(8,7,6))
+GC = {'Mild_IC':'#4878A6','Severe_IC':'#C1443C','Mild_IS':'#8FB8D8','Severe_IS':'#E1806A'}
+GORD = ['Mild_IC','Severe_IC','Mild_IS','Severe_IS']
+GLAB = {'Mild_IC':'Mild / IC','Severe_IC':'Severe / IC','Mild_IS':'Mild / IS','Severe_IS':'Severe / IS'}
+sid2g = meta_d.set_index('SampleID').Group.to_dict()
+order = [s for g in GORD for s in meta_d.SampleID if sid2g[s]==g]
 
+fig = plt.figure(figsize=(7.2, 7.6))
+gs = fig.add_gridspec(3, 2, height_ratios=[1,1,1.25], hspace=0.55, wspace=0.32)
+
+# a: pre-norm boxplot
+ax = fig.add_subplot(gs[0,0])
+data = [L[s].dropna() for s in order]
+bp = ax.boxplot(data, showfliers=False, patch_artist=True, widths=0.65,
+                medianprops=dict(color='k',lw=1.0))
+for b,s in zip(bp['boxes'], order): b.set(facecolor=GC[sid2g[s]], alpha=.85, lw=.6, edgecolor='k')
+ax.set_xticks(range(1,13)); ax.set_xticklabels(order, rotation=90)
+ax.set_ylabel("log$_2$ precursor intensity"); ax.set_title("Before normalization")
+panel_letter(ax,'a')
+
+# b: post-norm
+ax = fig.add_subplot(gs[0,1])
+data = [Ln[s].dropna() for s in order]
+bp = ax.boxplot(data, showfliers=False, patch_artist=True, widths=0.65, medianprops=dict(color='k',lw=1.0))
+for b,s in zip(bp['boxes'], order): b.set(facecolor=GC[sid2g[s]], alpha=.85, lw=.6, edgecolor='k')
+ax.set_xticks(range(1,13)); ax.set_xticklabels(order, rotation=90)
+ax.set_ylabel("log$_2$ precursor intensity"); ax.set_title("After median normalization")
+panel_letter(ax,'b')
+h=[mpl.patches.Patch(fc=GC[g], ec='k', lw=.5, label=GLAB[g]) for g in GORD]
+ax.legend(handles=h, frameon=False, fontsize=6, loc='lower left', bbox_to_anchor=(0,1.18), ncol=2, handlelength=1.1)
+
+# c: identified proteins / peptides per run
+ax = fig.add_subplot(gs[1,0])
+np_prot = pd.Series({s: Lf[s].notna().groupby(level=0).any().sum() for s in order})
+np_pep  = pd.Series({s: Lf[s].notna().groupby(level=1).any().sum() for s in order})
+x = np.arange(12)
+ax.bar(x, np_prot.values, color=[GC[sid2g[s]] for s in order], edgecolor='k', lw=.5)
+ax.set_xticks(x); ax.set_xticklabels(order, rotation=90)
+ax.set_ylabel("Proteins quantified"); ax.set_title("Proteome depth per sample")
+ax.axhline(np_prot.mean(), color=META_GREY, ls='--', lw=.8)
+ax.text(11.4, np_prot.mean()+3, f"mean {np_prot.mean():.0f}", fontsize=6, ha='right', color=META_GREY)
+ax.set_ylim(0, np_prot.max()*1.18); panel_letter(ax,'c')
+
+# d: peptides
+ax = fig.add_subplot(gs[1,1])
+ax.bar(x, np_pep.values, color=[GC[sid2g[s]] for s in order], edgecolor='k', lw=.5)
+ax.set_xticks(x); ax.set_xticklabels(order, rotation=90)
+ax.set_ylabel("Peptides quantified"); ax.set_title("Peptide-level depth per sample")
+ax.axhline(np_pep.mean(), color=META_GREY, ls='--', lw=.8)
+ax.text(11.4, np_pep.mean()+60, f"mean {np_pep.mean():.0f}", fontsize=6, ha='right', color=META_GREY)
+ax.set_ylim(0, np_pep.max()*1.18); panel_letter(ax,'d')
+
+# e: correlation heatmap
+ax = fig.add_subplot(gs[2,0])
+C = P2[order].corr(method='pearson')
+im = ax.imshow(C.values, cmap='viridis', vmin=np.nanmin(C.values), vmax=1)
+ax.set_xticks(range(12)); ax.set_xticklabels(order, rotation=90)
+ax.set_yticks(range(12)); ax.set_yticklabels(order)
+for i,s in enumerate(order):
+    ax.add_patch(mpl.patches.Rectangle((i-0.5,-1.1),1,0.55,color=GC[sid2g[s]],clip_on=False,lw=0))
+ax.set_ylim(11.5,-1.15)
+cb = fig.colorbar(im, ax=ax, fraction=.046, pad=.03); cb.set_label("Pearson r", fontsize=6); cb.ax.tick_params(labelsize=6)
+ax.set_title("Inter-sample reproducibility"); panel_letter(ax,'e')
+
+# f: missingness
+ax = fig.add_subplot(gs[2,1])
+nobs = Ln.notna().sum(axis=1)
+ax.bar(np.arange(1,13), [ (nobs==k).sum() for k in range(1,13) ], color='#7A7A7A', edgecolor='k', lw=.5)
+ax.bar([12], [(nobs==12).sum()], color='#4878A6', edgecolor='k', lw=.5)
+ax.set_xticks(range(1,13)); ax.set_xlabel("Samples with a valid value")
+ax.set_ylabel("Precursors"); ax.set_title("Data completeness")
+ax.text(11.6, (nobs==12).sum()*1.02, f"{100*(nobs==12).sum()/len(nobs):.0f}% complete", fontsize=6, ha='right')
+ax.set_ylim(0,(nobs==12).sum()*1.16); panel_letter(ax,'f')
+
+fig.savefig("figs/FigS1_discovery_QC.png", dpi=300, bbox_inches='tight')
+print("prot/run", np_prot.min(), np_prot.max(), "| pep/run", np_pep.min(), np_pep.max())
+print("median inter-sample r: %.3f (range %.3f-%.3f)" % (np.median(C.values[np.triu_indices(12,1)]), C.values[np.triu_indices(12,1)].min(), C.values[np.triu_indices(12,1)].max()))
+
+## Exploring discovery matrices and QC metrics
+P2.to_csv("out/discovery_protein_matrix.csv")
+Lf.to_csv("out/discovery_precursor_matrix_normalized.csv")
+qc = pd.DataFrame({'SampleID':order,'Group':[sid2g[s] for s in order],
+                   'Proteins':np_prot[order].values,'Peptides':np_pep[order].values,
+                   'MedianLog2_raw':L[order].median().values,'MedianLog2_norm':Ln[order].median().values})
+qc.to_csv("out/discovery_QC_metrics.csv", index=False)
+print(qc.round(2).to_string())
+
+## Fitting moderated 2*2 factorial models
+from scipy import stats
+from scipy.special import digamma, polygamma
+from scipy.optimize import brentq
+
+def trigamma_inverse(x):
+    """limma's trigammaInverse."""
+    y = np.asarray(x, float)
+    out = np.empty_like(y)
+    for i,v in enumerate(y):
+        if not np.isfinite(v) or v<=0: out[i]=np.nan; continue
+        if v > 1e7: out[i]=1/np.sqrt(v); continue
+        if v < 1e-6: out[i]=1/v; continue
+        z = 0.5 + 1/v
+        for _ in range(60):
+            tri = polygamma(1,z); tet = polygamma(2,z)
+            dz = tri*(1-tri/v)/tet
+            z += dz
+            if abs(dz/z) < 1e-10: break
+        out[i]=z
+    return out
+
+def squeeze_var(s2, df):
+    """Smyth (2004) empirical Bayes variance moderation -> (d0, s0^2)."""
+    s2 = np.asarray(s2,float); df=np.asarray(df,float)
+    ok = np.isfinite(s2) & (s2>0) & (df>0)
+    z = np.log(s2[ok]); dfo = df[ok]
+    e = z - digamma(dfo/2) + np.log(dfo/2)
+    ebar = e.mean()
+    n = ok.sum()
+    evar = ((e-ebar)**2).sum()/(n-1) - np.mean(polygamma(1,dfo/2))
+    if evar > 0:
+        d0 = 2*trigamma_inverse(np.array([evar]))[0]
+        s02 = np.exp(ebar + digamma(d0/2) - np.log(d0/2))
+    else:
+        d0 = np.inf; s02 = np.exp(ebar)
+    return d0, s02
+
+def fit_2x2(M, meta, coefs=('Severity','Immune','Interaction')):
+    """OLS per protein + eBayes moderation. M: proteins x samples (log2)."""
+    mm = meta.set_index('SampleID').loc[M.columns]
+    sev = (mm.Severity=='Severe').astype(float).values
+    imm = (mm.Immune=='Immunosuppressed').astype(float).values
+    X_full = np.column_stack([np.ones(len(sev)), sev, imm, sev*imm])
+    names = ['Intercept','Severity','Immune','Interaction']
+    res={}
+    for p in M.index:
+        y = M.loc[p].values.astype(float); m = np.isfinite(y)
+        if m.sum() < 6: continue
+        X = X_full[m]; yy = y[m]
+        if np.linalg.matrix_rank(X) < X.shape[1]: continue
+        XtXi = np.linalg.pinv(X.T@X)
+        b = XtXi@X.T@yy
+        r = yy - X@b
+        dfr = m.sum() - X.shape[1]
+        if dfr < 1: continue
+        s2 = (r@r)/dfr
+        res[p] = dict(df=dfr, s2=s2, **{f"b_{n}":bv for n,bv in zip(names,b)},
+                      **{f"v_{n}":XtXi[i,i] for i,n in enumerate(names)}, n_obs=int(m.sum()))
+    R = pd.DataFrame(res).T
+    d0, s02 = squeeze_var(R.s2.values, R.df.values)
+    R['s2_post'] = (R.df*R.s2 + d0*s02)/(R.df + d0)
+    R['df_total'] = R.df + d0
+    out={}
+    for c in coefs:
+        se = np.sqrt(R.s2_post * R[f'v_{c}'])
+        t = R[f'b_{c}']/se
+        p = 2*stats.t.sf(np.abs(t), R.df_total)
+        _, q = stats.false_discovery_control(p, method='bh'), None
+        tab = pd.DataFrame({'log2FC':R[f'b_{c}'].values, 'SE':se.values, 't':t.values,
+                            'P':p, 'n_obs':R.n_obs.values}, index=R.index)
+        tab['FDR'] = stats.false_discovery_control(tab.P.values, method='bh')
+        out[c]=tab.sort_values('P')
+    return out, d0, s02, R
+
+DE, d0, s02, RFIT = fit_2x2(P2, meta_d)
+print("eBayes prior df d0=%.2f, s0^2=%.4f, residual df=%d" % (d0, s02, RFIT.df.iloc[0]))
+for c,t in DE.items():
+    print(f"\n== {c}: FDR<0.05 n={(t.FDR<0.05).sum()}, P<0.05 n={(t.P<0.05).sum()}, P<0.05&|FC|>0.585 n={((t.P<0.05)&(t.log2FC.abs()>0.585)).sum()}")
+    tt2=t.head(8).copy(); tt2['Gene']=[gmap.get(i,i) for i in tt2.index]
+    print(tt2[['Gene','log2FC','P','FDR']].round(4).to_string())
+
+## Mapping internal standard areas to normalization denominators
+ISd = tg_all[tg_all.is_IS].copy()
+ISd['trans'] = ISd['Fragment Ion'].astype(str)+"_"+ISd['Product Mz'].round(3).astype(str)+"_z"+ISd['Product Charge'].astype(str)
+# each IS peptide 1800 rows / 40 rep = 45 rows per rep -> many transitions incl isotope channels
+print("IS transitions per peptide:", ISd.groupby('Peptide').trans.nunique().to_dict())
+# IS Area column within target rows: 3 unique per rep -> these are the 3 IS reference areas used as denominators
+# map: does IS Area of target rows match ISd Area of a specific IS peptide?
+isarea = ISd.groupby(['Peptide','Replicate']).Area.max()
+tgt_isareas = T.groupby('Replicate')['IS Area'].apply(lambda s: sorted(s.unique()))
+print("\nrep1 target IS areas:", tgt_isareas[1])
+print("rep1 IS peptide max areas:", isarea.xs(1,level=1).to_dict())
+
+## Confirming internal standard normalization series structure
+T = T.sort_values(['Peptide','Replicate','Product Mz'])
+T['tr_ord'] = T.groupby(['Peptide','Replicate']).cumcount()
+chk = T.groupby(['Replicate','tr_ord'])['IS Area'].nunique()
+print("IS Area unique per (rep, transition-ordinal):", chk.value_counts().to_dict())
+# so IS Area is a run-level scaling series shared across peptides
+isref = T.groupby(['Replicate','tr_ord'])['IS Area'].first().unstack()
+print(isref.head(4).to_string())
+print("\nIS Area CV across runs, per ordinal:", (100*isref.std()/isref.mean()).round(1).to_dict())
+print("global IS CV: %.1f%%" % (100*isref.values.std()/isref.values.mean()))
+
+## Aggregating targeted peptide PAR and screening severity signal
+# peptide-level: sum of PAR across transitions (per replicate), on the 3-transition set
+T3 = T[T.tr_ord<3]
+pepPAR = T3.pivot_table(index='Peptide', columns='Replicate', values='PAR', aggfunc='sum')
+pepmap = T3.groupby('Peptide').Protein.first()
+rep2sid = meta_t.set_index('Replicate').SampleID.to_dict()
+pepPAR.columns = [rep2sid[c] for c in pepPAR.columns]
+print("peptide x sample:", pepPAR.shape)
+print("zero/near-zero:", (pepPAR<=0).sum().sum(), "| min>0:", pepPAR[pepPAR>0].min().min())
+Ppep = np.log2(pepPAR.replace(0,np.nan))
+mt = meta_t.set_index('SampleID').loc[Ppep.columns]
+sev_m = (mt.Severity=='Severe').values
+print("\nsevere n=%d mild n=%d" % (sev_m.sum(), (~sev_m).sum()))
+# quick signal check
+pv=[]
+for pep in Ppep.index:
+    y=Ppep.loc[pep].values
+    a=y[sev_m]; bb=y[~sev_m]
+    a=a[np.isfinite(a)]; bb=bb[np.isfinite(bb)]
+    if len(a)>4 and len(bb)>4:
+        pv.append((pep, pepmap[pep], np.nanmean(a)-np.nanmean(bb), stats.mannwhitneyu(a,bb).pvalue))
+PV=pd.DataFrame(pv,columns=['Peptide','Protein','log2FC','P']).sort_values('P')
+PV['FDR']=stats.false_discovery_control(PV.P.values,method='bh')
+print("peptides P<0.05: %d/%d | FDR<0.05: %d" % ((PV.P<0.05).sum(), len(PV), (PV.FDR<0.05).sum()))
+PV['Gene']=[gmap.get(p, ann.Gene.get(p, p.split('|')[-1])) for p in PV.Protein]
+print(PV.head(20)[['Gene','Peptide','log2FC','P','FDR']].round(4).to_string())
+
+## Comparing normalization strategies for targeted data
+# sample-level median normalization on log2 PAR (corrects residual loading/IS variance)
+Pn = Ppep - Ppep.median() + Ppep.median().mean()
+print("sample median log2PAR range pre-norm: %.2f to %.2f" % (Ppep.median().min(), Ppep.median().max()))
+def screen(M, tag):
+    rows=[]
+    for pep in M.index:
+        y=M.loc[pep].values; a=y[sev_m]; bb=y[~sev_m]
+        a=a[np.isfinite(a)]; bb=bb[np.isfinite(bb)]
+        if len(a)>4 and len(bb)>4:
+            rows.append((pep, np.nanmean(a)-np.nanmean(bb), stats.mannwhitneyu(a,bb).pvalue))
+    D=pd.DataFrame(rows,columns=['Peptide','log2FC','P'])
+    D['FDR']=stats.false_discovery_control(D.P.values,method='bh')
+    print(f"{tag}: P<.05 {(D.P<0.05).sum()}/{len(D)} | FDR<.05 {(D.FDR<0.05).sum()} | FDR<.10 {(D.FDR<0.10).sum()} | minFDR {D.FDR.min():.4f}")
+    return D
+Draw = screen(Ppep,"raw PAR      ")
+Dnorm= screen(Pn,  "median-norm  ")
+
+## Testing for global loading confound in targeted data
+print("direction of log2FC (raw PAR):", (Draw.log2FC>0).sum(), "up vs", (Draw.log2FC<0).sum(), "down")
+smed = Ppep.median()
+print("\nsample median log2PAR by severity:")
+print(pd.DataFrame({'median':smed,'Severity':mt.Severity.values}).groupby('Severity')['median'].describe().round(3).to_string())
+print("MWU p for sample-median vs severity: %.4f" % stats.mannwhitneyu(smed[sev_m], smed[~sev_m]).pvalue)
+# IS area per sample vs severity - is there a technical confound?
+isv = isref.mean(axis=1); isv.index=[rep2sid[i] for i in isref.index]; isv=isv[Ppep.columns]
+print("IS area mean by severity MWU p: %.4f" % stats.mannwhitneyu(isv[sev_m], isv[~sev_m]).pvalue)
+print(pd.DataFrame({'IS':isv,'Severity':mt.Severity.values}).groupby('Severity').IS.mean().round(0).to_dict())
+
+## Computing MRM peptide-level QC metrics
+# ---- MRM QC metrics ----
+qc_rows=[]
+for pep, sub in T3.groupby('Peptide'):
+    w = sub.pivot_table(index='Replicate', columns='tr_ord', values='PAR')
+    tot = w.sum(axis=1)
+    # transition ratio consistency: CV of each transition's fraction of total
+    frac = w.div(tot, axis=0)
+    rt = sub.groupby('Replicate')['Retention Time'].first()
+    qc_rows.append(dict(Peptide=pep, Protein=pepmap[pep],
+        n_detected=int((tot>0).sum()), det_rate=100*(tot>0).mean(),
+        median_PAR=tot.median(), CV_PAR=100*tot.std()/tot.mean(),
+        RT_mean=rt.mean(), RT_SD=rt.std(),
+        frac_CV_max=100*frac.std().div(frac.mean()).max(),
+        SN_median=(sub.Area/sub.Background.replace(0,np.nan)).median()))
+QCp = pd.DataFrame(qc_rows)
+QCp['Gene']=[gmap.get(p, p.split('|')[-1]) for p in QCp.Protein]
+print("peptides:", len(QCp))
+print("detection rate: min %.0f%%, %d peptides at 100%%" % (QCp.det_rate.min(), (QCp.det_rate==100).sum()))
+print("CV_PAR: median %.1f%%, IQR %.1f-%.1f, >30%%: %d, >50%%: %d" % (
+    QCp.CV_PAR.median(), QCp.CV_PAR.quantile(.25), QCp.CV_PAR.quantile(.75), (QCp.CV_PAR>30).sum(), (QCp.CV_PAR>50).sum()))
+print("RT SD: median %.2f min, max %.2f" % (QCp.RT_SD.median(), QCp.RT_SD.max()))
+print("S/N median: %.1f" % QCp.SN_median.median())
+print("\nlow quality (det<80%% or CV>100%%):", QCp[(QCp.det_rate<80)|(QCp.CV_PAR>100)][['Gene','Peptide','det_rate','CV_PAR']].round(1).to_string())
+
+## Setting MRM quality gate thresholds
+print("frac_CV_max (transition ratio consistency): median %.0f%%, quartiles %s" % (
+    QCp.frac_CV_max.median(), QCp.frac_CV_max.quantile([.25,.75,.9]).round(0).to_dict()))
+print("SN_median: quartiles", QCp.SN_median.quantile([.1,.25,.5,.75]).round(1).to_dict())
+print("median_PAR: quartiles", QCp.median_PAR.quantile([.1,.25,.5,.75]).round(3).to_dict())
+# gate
+gate = (QCp.frac_CV_max <= 50) & (QCp.SN_median >= 3) & (QCp.median_PAR >= 0.01)
+print("\npass gate: %d/%d peptides, %d proteins" % (gate.sum(), len(QCp), QCp[gate].Protein.nunique()))
+for thr in [30,40,50,60,80]:
+    g=(QCp.frac_CV_max<=thr)&(QCp.SN_median>=3)&(QCp.median_PAR>=0.01)
+    print(f"  fracCV<={thr}: {g.sum()} peptides, {QCp[g].Protein.nunique()} proteins")
+
+## Recomputing peptide response with unified IS reference
+# peptide response = sum(Area over its transitions) / run-level IS reference (mean of 3 IS areas)
+isrun = isref.mean(axis=1)                       # per Replicate
+areaW = T3.pivot_table(index='Peptide', columns='Replicate', values='Area', aggfunc='sum')
+resp  = areaW.div(isrun.reindex(areaW.columns), axis=1)
+resp.columns = [rep2sid[c] for c in resp.columns]
+resp = resp[Ppep.columns]
+
+# transition-ratio consistency on raw Areas (denominator-free)
+qc2=[]
+for pep, sub in T3.groupby('Peptide'):
+    w = sub.pivot_table(index='Replicate', columns='tr_ord', values='Area')
+    frac = w.div(w.sum(axis=1).replace(0,np.nan), axis=0)
+    rt = sub.groupby('Replicate')['Retention Time'].first()
+    sn = (sub.Area/sub.Background.replace(0,np.nan))
+    qc2.append(dict(Peptide=pep, Protein=pepmap[pep],
+        det_rate=100*(w.sum(axis=1)>0).mean(),
+        median_area=w.sum(axis=1).median(),
+        ratio_CV=100*np.nanmax(frac.std()/frac.mean()),
+        RT_SD=rt.std(), RT_mean=rt.mean(),
+        SN_median=sn.median(), SN_p10=sn.quantile(.10),
+        interind_CV=100*resp.loc[pep].std()/resp.loc[pep].mean()))
+QC2 = pd.DataFrame(qc2)
+QC2['Gene']=[gmap.get(p,p.split('|')[-1]) for p in QC2.Protein]
+print("ratio_CV: median %.0f%%, q25 %.0f, q75 %.0f" % (QC2.ratio_CV.median(), QC2.ratio_CV.quantile(.25), QC2.ratio_CV.quantile(.75)))
+for thr in [25,30,40,50]:
+    g=(QC2.ratio_CV<=thr)&(QC2.SN_median>=5)
+    print(f"  ratioCV<={thr} & SN>=5: {g.sum()} peptides, {QC2[g].Protein.nunique()} proteins")
+
+## Comparing transition selection strategies on QC criteria
+# choose quantifier transition per peptide by QC only: highest median S/N across runs
+sn_by_tr = T3.assign(sn=T3.Area/T3.Background.replace(0,np.nan)).groupby(['Peptide','tr_ord']).sn.median()
+best_tr = sn_by_tr.groupby('Peptide').idxmax().apply(lambda x: x[1])
+rank2_tr = sn_by_tr.groupby('Peptide').nlargest(2).reset_index(level=0,drop=True).reset_index()
+
+strategies={}
+strategies['sum3'] = resp
+for tag, sel in [('best1', 1), ('top2', 2)]:
+    keep = sn_by_tr.groupby('Peptide').nlargest(sel).reset_index(level=0,drop=True).reset_index()[['Peptide','tr_ord']]
+    sub = T3.merge(keep, on=['Peptide','tr_ord'])
+    w = sub.pivot_table(index='Peptide', columns='Replicate', values='Area', aggfunc='sum')
+    r = w.div(isrun.reindex(w.columns), axis=1); r.columns=[rep2sid[c] for c in r.columns]
+    strategies[tag]=r[Ppep.columns]
+
+for tag, R in strategies.items():
+    sn_keep = T3.assign(sn=T3.Area/T3.Background.replace(0,np.nan))
+    if tag=='sum3': snk = sn_keep.groupby('Peptide').sn.median()
+    else:
+        n = 1 if tag=='best1' else 2
+        keep = sn_by_tr.groupby('Peptide').nlargest(n).reset_index(level=0,drop=True).reset_index()[['Peptide','tr_ord']]
+        snk = sn_keep.merge(keep,on=['Peptide','tr_ord']).groupby('Peptide').sn.median()
+    print(f"{tag:6s}: median S/N of quantifier {snk.median():6.1f} | frac peptides S/N>=10: {100*(snk>=10).mean():.0f}% | log2 resp range {np.log2(R.replace(0,np.nan)).median().min():.2f}..{np.log2(R.replace(0,np.nan)).median().max():.2f}")
+
+## Finializing targeted peptide and protein quantification
+QUANT = strategies['best1']                     # pre-specified: highest-S/N transition per peptide
+Lq  = np.log2(QUANT.replace(0,np.nan))
+Lq3 = np.log2(strategies['sum3'].replace(0,np.nan))   # sensitivity
+print("missing:", Lq.isna().sum().sum(), "of", Lq.size)
+
+# protein-level: median of peptide-centered log2 responses, re-offset to protein mean
+def rollup(Lp):
+    cen = Lp.sub(Lp.mean(axis=1), axis=0)
+    g = pd.Series(pepmap.reindex(Lp.index).values, index=Lp.index)
+    out = cen.groupby(g).median()
+    base = Lp.mean(axis=1).groupby(g).mean()
+    return out.add(base, axis=0)
+Prot_t  = rollup(Lq)
+Prot_t3 = rollup(Lq3)
+print("protein x sample:", Prot_t.shape)
+QC2['quant_tr'] = QC2.Peptide.map(best_tr)
+QC2.to_csv("out/targeted_peptide_QC.csv", index=False)
+Lq.to_csv("out/targeted_peptide_log2response.csv")
+Prot_t.to_csv("out/targeted_protein_log2response.csv")
+print(Prot_t.iloc[:5,:5].round(3).to_string())
+
+## Running targeted protein-level severity statistics
+import statsmodels.formula.api as smf
+mt2 = mt.copy(); mt2['Sev']=(mt2.Severity=='Severe').astype(int); mt2['Imm']=(mt2.Immune=='Immunosuppressed').astype(int)
+
+def target_stats(M, level='protein'):
+    rows=[]
+    for f in M.index:
+        y = M.loc[f]
+        df = pd.DataFrame({'y':y.values,'Sev':mt2.Sev.values,'Imm':mt2.Imm.values,
+                           'Age':mt2.Age.values,'Male':(mt2.Sex=='Male').astype(int).values}).dropna()
+        if df.y.nunique()<5: continue
+        m1 = smf.ols("y ~ Sev + Imm + Sev:Imm", df).fit()
+        m2 = smf.ols("y ~ Sev + Imm + Age + Male", df).fit()
+        a = df.y[df.Sev==1]; b = df.y[df.Sev==0]
+        u = stats.mannwhitneyu(a,b)
+        n1,n0=len(a),len(b)
+        auc = u.statistic/(n1*n0)
+        sp = np.sqrt(((n1-1)*a.var(ddof=1)+(n0-1)*b.var(ddof=1))/(n1+n0-2))
+        rows.append(dict(Feature=f,
+            log2FC=a.mean()-b.mean(), Cohens_d=(a.mean()-b.mean())/sp,
+            P_MWU=u.pvalue, AUC=auc,
+            beta_Sev=m1.params['Sev'], P_Sev=m1.pvalues['Sev'],
+            beta_Imm=m1.params['Imm'], P_Imm=m1.pvalues['Imm'],
+            beta_Int=m1.params['Sev:Imm'], P_Int=m1.pvalues['Sev:Imm'],
+            beta_Sev_adj=m2.params['Sev'], P_Sev_adj=m2.pvalues['Sev'],
+            n=len(df)))
+    D=pd.DataFrame(rows).set_index('Feature')
+    for c in ['P_MWU','P_Sev','P_Imm','P_Int','P_Sev_adj']:
+        D['FDR'+c[1:]] = stats.false_discovery_control(D[c].values, method='bh')
+    return D
+
+TS = target_stats(Prot_t)
+TS['Gene']=[gmap.get(i, i.split('|')[-1]) for i in TS.index]
+TS['AUC_dir']=np.where(TS.AUC<0.5, 1-TS.AUC, TS.AUC)
+TS = TS.sort_values('P_MWU')
+print("proteins: FDR_MWU<0.05 %d | <0.10 %d | P_MWU<0.05 %d of %d" % (
+    (TS.FDR_MWU<0.05).sum(), (TS.FDR_MWU<0.10).sum(), (TS.P_MWU<0.05).sum(), len(TS)))
+print(TS.head(18)[['Gene','log2FC','Cohens_d','AUC','P_MWU','FDR_MWU','P_Sev_adj','P_Int']].round(4).to_string())
+
+## Running sensitivity analyzes across quantification strategies
+TS3 = target_stats(Prot_t3); TS3['Gene']=[gmap.get(i,i.split('|')[-1]) for i in TS3.index]
+print("sum3 sensitivity: P_MWU<.05 %d, FDR<.10 %d, minFDR %.3f" % ((TS3.P_MWU<0.05).sum(), (TS3.FDR_MWU<0.10).sum(), TS3.FDR_MWU.min()))
+cmp = TS[['Gene','log2FC','AUC','P_MWU']].join(TS3[['log2FC','AUC','P_MWU']], rsuffix='_sum3')
+print("Spearman(AUC best1 vs sum3): %.3f | Spearman(log2FC): %.3f" % (
+    stats.spearmanr(cmp.AUC, cmp.AUC_sum3).statistic, stats.spearmanr(cmp.log2FC, cmp.log2FC_sum3).statistic))
+TSp = target_stats(Lq); TSp['Gene']=[gmap.get(pepmap[i], pepmap[i].split('|')[-1]) for i in TSp.index]
+TSp['Protein']=[pepmap[i] for i in TSp.index]
+print("\npeptide-level: P_MWU<.05 %d/%d, FDR<.05 %d, FDR<.10 %d, minFDR %.4f" % (
+    (TSp.P_MWU<0.05).sum(), len(TSp), (TSp.FDR_MWU<0.05).sum(), (TSp.FDR_MWU<0.10).sum(), TSp.FDR_MWU.min()))
+print(TSp.sort_values('P_MWU').head(10)[['Gene','log2FC','AUC','P_MWU','FDR_MWU']].round(4).to_string())
+
+## Computing discovery-targeted concordance
+TS.to_csv("out/targeted_protein_stats.csv"); TSp.to_csv("out/targeted_peptide_stats.csv")
+TS3.to_csv("out/targeted_protein_stats_sum3sensitivity.csv")
+for c,t in DE.items():
+    o=t.copy(); o.insert(0,'Gene',[gmap.get(i,i) for i in o.index])
+    o.insert(1,'ProteinDesc',[ann.ProteinDesc.get(i,'') for i in o.index])
+    o.to_csv(f"out/discovery_DEP_{c.lower()}.csv")
+
+# concordance: discovery severity log2FC vs targeted severity log2FC
+dsev = DE['Severity'].copy(); dsev['accb']=[b(i.split('|')[1]) for i in dsev.index]
+tsev = TS.copy(); tsev['accb']=[b(i.split('|')[1]) for i in tsev.index]
+CO = tsev.reset_index().merge(dsev.reset_index()[['accb','log2FC','P','FDR']], on='accb', suffixes=('_tgt','_disc'))
+CO = CO.rename(columns={'log2FC_tgt':'log2FC_targeted','log2FC_disc':'log2FC_discovery',
+                        'P_MWU':'P_targeted','P':'P_discovery'})
+r_p = stats.pearsonr(CO.log2FC_discovery, CO.log2FC_targeted)
+r_s = stats.spearmanr(CO.log2FC_discovery, CO.log2FC_targeted)
+conc = ((CO.log2FC_discovery>0)==(CO.log2FC_targeted>0)).mean()
+print("matched proteins: %d" % len(CO))
+print("Pearson r=%.3f p=%.4f | Spearman rho=%.3f p=%.4f | sign concordance %.1f%%" % (r_p.statistic, r_p.pvalue, r_s.statistic, r_s.pvalue, 100*conc))
+sig = CO[CO.P_targeted<0.05]
+print("among targeted-significant (n=%d): sign concordance %.1f%%" % (len(sig), 100*((sig.log2FC_discovery>0)==(sig.log2FC_targeted>0)).mean()))
+CO[['Gene','accb','log2FC_discovery','P_discovery','log2FC_targeted','P_targeted','FDR_MWU','AUC']].round(4).to_csv("out/concordance.csv", index=False)
+print(CO.sort_values('P_targeted').head(12)[['Gene','log2FC_discovery','P_discovery','log2FC_targeted','P_targeted','AUC']].round(3).to_string(index=False))
+
+## Testing concordance across discovery contrast definitions
+cands = {'2x2_Severity_coef': DE['Severity'].log2FC,
+         'pooled_SeverevsMild': SP.log2FC.astype(float),
+         'Severe_IC_vs_Mild_IC': contrast_groups(P2,'Severe_IC','Mild_IC').log2FC,
+         'Severe_IS_vs_Mild_IS': contrast_groups(P2,'Severe_IS','Mild_IS').log2FC}
+tmap = tsev.set_index('accb').log2FC
+for tag, ser in cands.items():
+    s = pd.Series(ser.values, index=[b(i.split('|')[1]) for i in ser.index])
+    common = s.index.intersection(tmap.index)
+    rr = stats.pearsonr(s[common], tmap[common])
+    sg = ((s[common]>0)==(tmap[common]>0)).mean()
+    print(f"{tag:24s} n={len(common)} r={rr.statistic:+.3f} p={rr.pvalue:.3f} sign_conc={100*sg:.0f}%")
+
+## Quantifying measurement error attenuation on concordance
+sed = DE['Severity'].copy()
+se_disc = sed.SE.median()
+var_obs = sed.log2FC.var()
+print("discovery severity: median SE %.3f | observed var(log2FC) %.3f | implied true var %.3f" % (se_disc, var_obs, var_obs - se_disc**2))
+print("reliability (true/observed) = %.2f" % ((var_obs-se_disc**2)/var_obs))
+# targeted side reliability
+se_t = (TS.log2FC/stats.norm.ppf(1-TS.P_MWU/2)).abs().median()
+print("targeted median implied SE ~%.3f | var(log2FC) %.3f" % (se_t, TS.log2FC.var()))
+rmax = np.sqrt(max((var_obs-se_disc**2)/var_obs,0)) * np.sqrt(max((TS.log2FC.var()-se_t**2)/TS.log2FC.var(),0))
+print("max attainable r given measurement error: %.2f" % rmax)
