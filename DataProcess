@@ -459,3 +459,183 @@ se_t = (TS.log2FC/stats.norm.ppf(1-TS.P_MWU/2)).abs().median()
 print("targeted median implied SE ~%.3f | var(log2FC) %.3f" % (se_t, TS.log2FC.var()))
 rmax = np.sqrt(max((var_obs-se_disc**2)/var_obs,0)) * np.sqrt(max((TS.log2FC.var()-se_t**2)/TS.log2FC.var(),0))
 print("max attainable r given measurement error: %.2f" % rmax)
+
+## Running STRING functional enrichment
+import time
+STRING="https://string-db.org/api"
+def string_enrich(genes, bg=None):
+    d={'identifiers':'%0d'.join(genes),'species':9606,'caller_identity':'plasma_proteomics_analysis'}
+    if bg: d['background_string_identifiers']='%0d'.join(bg)
+    r=requests.post(f"{STRING}/json/enrichment", data=d, timeout=60); r.raise_for_status()
+    return pd.DataFrame(r.json())
+def string_net(genes):
+    r=requests.post(f"{STRING}/json/network", data={'identifiers':'%0d'.join(genes),'species':9606,
+        'required_score':400,'caller_identity':'plasma_proteomics_analysis'}, timeout=60); r.raise_for_status()
+    return pd.DataFrame(r.json())
+
+panel_genes = sorted({gmap.get(p, p.split('|')[-1]) for p in TS.index})
+disc_genes  = sorted({gmap.get(i,i) for i in DE['Severity'].index[DE['Severity'].P<0.05]} |
+                     {gmap.get(i,i) for i in DE['Immune'].index[DE['Immune'].P<0.05]} |
+                     {gmap.get(i,i) for i in DE['Interaction'].index[DE['Interaction'].P<0.05]})
+ver_genes = sorted(TS[TS.P_MWU<0.05].Gene.unique())
+print("panel %d | discovery nominal %d | verified %d" % (len(panel_genes), len(disc_genes), len(ver_genes)))
+E_panel = string_enrich(panel_genes); time.sleep(1)
+E_ver   = string_enrich(ver_genes)
+print("\npanel enrichment terms:", len(E_panel), "| verified:", len(E_ver))
+print(E_panel.category.value_counts().to_dict())
+
+## Selecting non-redundant enriched pathway terms
+def top_terms(E, n=12, fdr_cut=0.05, min_g=3):
+    e=E[E.category.isin(KEEP)].copy()
+    e['genes']=e.preferredNames.apply(lambda x: set(x) if isinstance(x,list) else set(str(x).split(',')))
+    e['nGenes']=e.genes.apply(len)
+    e=e[(e.nGenes>=min_g)&(e.fdr<fdr_cut)].sort_values('fdr')
+    kept=[]
+    for _,row in e.iterrows():
+        if all(len(row.genes & k.genes)/len(row.genes | k.genes) < 0.7 for k in kept):
+            kept.append(row)
+        if len(kept)>=n: break
+    if not kept: return pd.DataFrame()
+    D=pd.DataFrame(kept).reset_index(drop=True)
+    D['GeneList']=D.genes.apply(lambda s: ",".join(sorted(s)))
+    D['FoldEnrich']=D.number_of_genes/ (D.number_of_genes_in_background * D.nGenes.iloc[0]/1) # placeholder
+    return D
+Tv = top_terms(E_ver, 12); Tp = top_terms(E_panel, 14)
+print("VERIFIED (%d terms):" % len(Tv))
+print(Tv[['category','description','nGenes','fdr','GeneList']].to_string(index=False))
+
+## Mapping identifiers and rerunning background enrichment
+mp = requests.post(f"{STRING}/json/get_string_ids", data={'identifiers':'%0d'.join(panel_genes),'species':9606,
+        'caller_identity':'plasma_proteomics_analysis'}, timeout=60).json()
+sid_map = {m['queryItem']: m['stringId'] for m in mp}
+print("mapped %d/%d panel genes" % (len(sid_map), len(panel_genes)))
+bg_ids = [sid_map[g] for g in panel_genes if g in sid_map]
+fg_ids = [sid_map[g] for g in ver_genes if g in sid_map]
+r = requests.post(f"{STRING}/json/enrichment", data={'identifiers':'%0d'.join(fg_ids),'species':9606,
+        'background_string_identifiers':'%0d'.join(bg_ids),'caller_identity':'plasma_proteomics_analysis'}, timeout=60)
+E_bg = pd.DataFrame(r.json())
+print(E_bg.shape, list(E_bg.columns)[:6])
+if 'category' in E_bg.columns:
+    E_bg.to_csv("out/enrichment_verified_panelBackground.csv", index=False)
+    Tvb = top_terms(E_bg, 10, fdr_cut=0.25)
+    print("FDR<0.05: %d | FDR<0.25: %d" % ((E_bg.fdr<0.05).sum(), (E_bg.fdr<0.25).sum()))
+    print(Tvb[['category','description','nGenes','p_value','fdr','GeneList']].to_string(index=False) if len(Tvb) else "none")
+
+## Retrieving STRING interaction network for panel
+NET = string_net(panel_genes)
+NET.to_csv("out/string_network_panel.csv", index=False)
+print("edges (score>=0.4):", len(NET), "| nodes involved:", len(set(NET.preferredName_A)|set(NET.preferredName_B)))
+Tv.to_csv("out/pathway_top_verified.csv", index=False); Tp.to_csv("out/pathway_top_panel.csv", index=False)
+# GO BP summary of panel from UniProt annotation
+acc2gene = {b(i.split('|')[1]): gmap.get(i, i) for i in P.index}
+print("\ntop enriched panel terms (vs proteome):")
+print(Tp[['category','description','nGenes','fdr']].head(8).to_string(index=False))
+
+## Running nested cross-validated severity prediction
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold, GridSearchCV, cross_val_predict
+from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix
+from sklearn.ensemble import RandomForestClassifier
+
+X = Lq.T.copy()                       # samples x peptides
+y = mt2.Sev.values
+Xp = Prot_t.T.copy()
+print("X", X.shape, "y", y.sum(), "severe /", len(y))
+
+def nested_cv(Xd, yv, Cgrid=(0.01,0.03,0.1,0.3,1,3), n_rep=20, seed=0, model='l1'):
+    """Repeated stratified nested CV; inner loop tunes C, outer estimates AUC."""
+    aucs=[]; probs=np.zeros((n_rep, len(yv))); sel_counts={}
+    for rep in range(n_rep):
+        outer=StratifiedKFold(5, shuffle=True, random_state=seed+rep)
+        pr=np.zeros(len(yv))
+        for tr,te in outer.split(Xd,yv):
+            pipe=Pipeline([('imp',SimpleImputer(strategy='median')),('sc',StandardScaler()),
+                ('clf',LogisticRegression(penalty=model,solver='liblinear',max_iter=5000))])
+            gs=GridSearchCV(pipe,{'clf__C':Cgrid},cv=StratifiedKFold(4,shuffle=True,random_state=rep),scoring='roc_auc',n_jobs=-1)
+            gs.fit(Xd.iloc[tr],yv[tr])
+            pr[te]=gs.predict_proba(Xd.iloc[te])[:,1]
+            co=gs.best_estimator_.named_steps['clf'].coef_[0]
+            for f in Xd.columns[co!=0]: sel_counts[f]=sel_counts.get(f,0)+1
+        aucs.append(roc_auc_score(yv,pr)); probs[rep]=pr
+    return np.array(aucs), probs, pd.Series(sel_counts).sort_values(ascending=False)
+
+auc_pep, prob_pep, sel_pep = nested_cv(X, y, n_rep=20)
+print("PEPTIDE L1: nested CV AUC %.3f (SD %.3f, 95%% range %.3f-%.3f)" % (
+    auc_pep.mean(), auc_pep.std(), np.percentile(auc_pep,2.5), np.percentile(auc_pep,97.5)))
+auc_pr, prob_pr, sel_pr = nested_cv(Xp, y, n_rep=20)
+print("PROTEIN L1: nested CV AUC %.3f (SD %.3f)" % (auc_pr.mean(), auc_pr.std()))
+print("\nmost-selected peptides (of %d folds):" % (20*5))
+sp=sel_pep.head(12); print(pd.DataFrame({'Gene':[gmap.get(pepmap[i],i) for i in sp.index],'n_folds':sp.values}, index=sp.index).to_string())
+
+## Comparing candidate model configurations
+import warnings; warnings.filterwarnings("ignore")
+def mklr(l1r, C): return LogisticRegression(l1_ratio=l1r, C=C, solver='saga' if 0<l1r<1 else 'liblinear', max_iter=20000)
+
+def nested_cv2(Xd, yv, grid, n_rep=20, seed=0, ret_probs=True):
+    aucs=[]; probs=[]
+    for rep in range(n_rep):
+        pr=np.zeros(len(yv))
+        for tr,te in StratifiedKFold(5,shuffle=True,random_state=seed+rep).split(Xd,yv):
+            pipe=Pipeline([('imp',SimpleImputer(strategy='median')),('sc',StandardScaler()),
+                           ('clf',LogisticRegression(solver='liblinear',max_iter=20000))])
+            gs=GridSearchCV(pipe,grid,cv=StratifiedKFold(4,shuffle=True,random_state=rep),scoring='roc_auc',n_jobs=-1)
+            gs.fit(Xd.iloc[tr],yv[tr]); pr[te]=gs.predict_proba(Xd.iloc[te])[:,1]
+        aucs.append(roc_auc_score(yv,pr)); probs.append(pr)
+    return np.array(aucs), np.array(probs)
+
+grid_l1={'clf__l1_ratio':[1.0],'clf__C':[0.01,0.03,0.1,0.3,1,3]}
+grid_l2={'clf__l1_ratio':[0.0],'clf__C':[0.01,0.03,0.1,0.3,1,3]}
+top6  = TS.index[:6];  top4 = TS.index[:4]; top8 = TS.index[:8]
+cands = {
+ 'all46_L1': (Xp, grid_l1), 'all46_L2': (Xp, grid_l2),
+ 'top8_L2': (Xp[top8], grid_l2), 'top6_L2': (Xp[top6], grid_l2), 'top4_L2': (Xp[top4], grid_l2),
+ 'top6_L1': (Xp[top6], grid_l1),
+}
+res={}
+for tag,(Xd,g) in cands.items():
+    a,_=nested_cv2(Xd,y,g,n_rep=20); res[tag]=a
+    print(f"{tag:10s} AUC {a.mean():.3f} (SD {a.std():.3f}, range {a.min():.3f}-{a.max():.3f})")
+
+## Running fully nested feature selection and CV
+from sklearn.base import BaseEstimator, TransformerMixin
+class MWUSelect(BaseEstimator, TransformerMixin):
+    """Rank features by Mann-Whitney U p-value on TRAINING data only."""
+    def __init__(self, k=8): self.k=k
+    def fit(self, X, yv):
+        Xa=np.asarray(X,float); yv=np.asarray(yv)
+        p=np.ones(Xa.shape[1])
+        for j in range(Xa.shape[1]):
+            a=Xa[yv==1,j]; bb=Xa[yv==0,j]
+            a=a[np.isfinite(a)]; bb=bb[np.isfinite(bb)]
+            if len(a)>2 and len(bb)>2: p[j]=stats.mannwhitneyu(a,bb).pvalue
+        self.idx_=np.argsort(p)[:self.k]; self.p_=p
+        return self
+    def transform(self, X): return np.asarray(X,float)[:,self.idx_]
+
+def nested_cv_sel(Xd, yv, k_grid=(4,6,8,12), Cgrid=(0.03,0.1,0.3,1,3), n_rep=20, seed=0):
+    aucs=[]; probs=[]; picks={}
+    for rep in range(n_rep):
+        pr=np.zeros(len(yv))
+        for tr,te in StratifiedKFold(5,shuffle=True,random_state=seed+rep).split(Xd,yv):
+            pipe=Pipeline([('imp',SimpleImputer(strategy='median')),('sel',MWUSelect()),
+                           ('sc',StandardScaler()),('clf',LogisticRegression(l1_ratio=0.0,solver='liblinear',max_iter=20000))])
+            gs=GridSearchCV(pipe,{'sel__k':list(k_grid),'clf__C':list(Cgrid)},
+                            cv=StratifiedKFold(4,shuffle=True,random_state=rep),scoring='roc_auc',n_jobs=-1)
+            gs.fit(Xd.iloc[tr],yv[tr]); pr[te]=gs.predict_proba(Xd.iloc[te])[:,1]
+            be=gs.best_estimator_
+            for f in Xd.columns[be.named_steps['sel'].idx_]: picks[f]=picks.get(f,0)+1
+        aucs.append(roc_auc_score(yv,pr)); probs.append(pr)
+    return np.array(aucs), np.array(probs), pd.Series(picks).sort_values(ascending=False)
+
+auc_h, prob_h, picks_h = nested_cv_sel(Xp, y, n_rep=20)
+print("PROTEIN, selection nested inside CV: AUC %.3f (SD %.3f, 95%% %.3f-%.3f)" % (
+    auc_h.mean(), auc_h.std(), np.percentile(auc_h,2.5), np.percentile(auc_h,97.5)))
+auc_hp, prob_hp, picks_hp = nested_cv_sel(X, y, k_grid=(6,10,15,25), n_rep=20)
+print("PEPTIDE, selection nested: AUC %.3f (SD %.3f)" % (auc_hp.mean(), auc_hp.std()))
+print("\nprotein selection stability (of 100 folds):")
+ph=picks_h.head(10); print(pd.DataFrame({'Gene':[gmap.get(i,i) for i in ph.index],'n_folds':ph.values}).to_string(index=False))
+
+## 
